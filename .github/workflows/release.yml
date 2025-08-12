@@ -1,0 +1,278 @@
+name: Build and Release Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag'
+        required: true
+        default: 'v1.0.0'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # Linux x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: prisma-engines-linux-x64
+            
+          # Linux ARM64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: prisma-engines-linux-arm64
+            
+          # macOS x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: prisma-engines-macos-x64
+            
+          # macOS ARM64 (Apple Silicon)
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: prisma-engines-macos-arm64
+            
+          # Windows x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: prisma-engines-windows-x64
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+
+    - name: Install cross-compilation tools (Linux ARM64)
+      if: matrix.target == 'aarch64-unknown-linux-gnu'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu
+        echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+    - name: Cache Cargo registry
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+    - name: Build Release Binaries
+      run: |
+        cargo build --release --target ${{ matrix.target }} \
+          --bin query-engine \
+          --bin schema-engine \
+          --bin prisma-fmt
+
+    - name: Build Query Engine Library (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        cargo build --release --target ${{ matrix.target }} \
+          -p query-engine-node-api
+
+    - name: Build Query Engine Library (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        cargo build --release --target ${{ matrix.target }} \
+          -p query-engine-node-api
+
+    - name: Prepare Release Files (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        mkdir -p release/${{ matrix.artifact_name }}
+        
+        # Copy binaries
+        cp target/${{ matrix.target }}/release/query-engine release/${{ matrix.artifact_name }}/
+        cp target/${{ matrix.target }}/release/schema-engine release/${{ matrix.artifact_name }}/
+        cp target/${{ matrix.target }}/release/prisma-fmt release/${{ matrix.artifact_name }}/
+        
+        # Copy library if it exists
+        if [ -f target/${{ matrix.target }}/release/libquery_engine.so ]; then
+          cp target/${{ matrix.target }}/release/libquery_engine.so release/${{ matrix.artifact_name }}/
+        elif [ -f target/${{ matrix.target }}/release/libquery_engine.dylib ]; then
+          cp target/${{ matrix.target }}/release/libquery_engine.dylib release/${{ matrix.artifact_name }}/
+        fi
+        
+        # Create usage instructions
+        cat > release/${{ matrix.artifact_name }}/README.md << 'EOF'
+        # Prisma Engines - MySQL Zero-Date Support
+        
+        This build includes experimental MySQL zero-date handling that converts 
+        zero dates (0000-00-00) to NULL to prevent decode errors.
+        
+        ## Usage
+        
+        Add these environment variables to your .env file:
+        
+        ```env
+        # For binary engine mode (recommended)
+        PRISMA_CLIENT_ENGINE_TYPE=binary
+        PRISMA_QUERY_ENGINE_BINARY=/path/to/query-engine
+        PRISMA_SCHEMA_ENGINE_BINARY=/path/to/schema-engine
+        
+        # For library engine mode (if libquery_engine.* is present)
+        PRISMA_CLIENT_ENGINE_TYPE=library  
+        PRISMA_QUERY_ENGINE_LIBRARY=/path/to/libquery_engine.*
+        ```
+        
+        Then run: `npx prisma generate`
+        
+        ## What's Changed
+        
+        - Zero dates (0000-00-00, 0000-00-00 00:00:00) are converted to NULL
+        - Works with complex queries, joins, and raw SQL
+        - Only affects MySQL/MariaDB DATE and DATETIME columns
+        - TIME columns (00:00:00) remain unchanged
+        
+        Built from: https://github.com/jmceleney/prisma-engines
+        EOF
+
+    - name: Prepare Release Files (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        mkdir -p release/${{ matrix.artifact_name }}
+        
+        # Copy binaries
+        cp target/${{ matrix.target }}/release/query-engine.exe release/${{ matrix.artifact_name }}/
+        cp target/${{ matrix.target }}/release/schema-engine.exe release/${{ matrix.artifact_name }}/  
+        cp target/${{ matrix.target }}/release/prisma-fmt.exe release/${{ matrix.artifact_name }}/
+        
+        # Copy library if it exists
+        if (Test-Path target/${{ matrix.target }}/release/query_engine.dll) {
+          cp target/${{ matrix.target }}/release/query_engine.dll release/${{ matrix.artifact_name }}/
+        }
+        
+        # Create usage instructions
+        @'
+        # Prisma Engines - MySQL Zero-Date Support
+        
+        This build includes experimental MySQL zero-date handling that converts 
+        zero dates (0000-00-00) to NULL to prevent decode errors.
+        
+        ## Usage
+        
+        Add these environment variables to your .env file:
+        
+        ```env
+        # For binary engine mode (recommended)
+        PRISMA_CLIENT_ENGINE_TYPE=binary
+        PRISMA_QUERY_ENGINE_BINARY=C:\path\to\query-engine.exe
+        PRISMA_SCHEMA_ENGINE_BINARY=C:\path\to\schema-engine.exe
+        
+        # For library engine mode (if query_engine.dll is present)
+        PRISMA_CLIENT_ENGINE_TYPE=library  
+        PRISMA_QUERY_ENGINE_LIBRARY=C:\path\to\query_engine.dll
+        ```
+        
+        Then run: `npx prisma generate`
+        
+        ## What's Changed
+        
+        - Zero dates (0000-00-00, 0000-00-00 00:00:00) are converted to NULL
+        - Works with complex queries, joins, and raw SQL
+        - Only affects MySQL/MariaDB DATE and DATETIME columns
+        - TIME columns (00:00:00) remain unchanged
+        
+        Built from: https://github.com/jmceleney/prisma-engines
+        '@ | Out-File -FilePath release/${{ matrix.artifact_name }}/README.md -Encoding utf8
+
+    - name: Create Archive (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        cd release
+        tar -czf ${{ matrix.artifact_name }}.tar.gz ${{ matrix.artifact_name }}/
+
+    - name: Create Archive (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        cd release
+        Compress-Archive -Path ${{ matrix.artifact_name }}/* -DestinationPath ${{ matrix.artifact_name }}.zip
+
+    - name: Upload Artifacts (Unix)
+      if: runner.os != 'Windows'
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.artifact_name }}.tar.gz
+        path: release/${{ matrix.artifact_name }}.tar.gz
+
+    - name: Upload Artifacts (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.artifact_name }}.zip
+        path: release/${{ matrix.artifact_name }}.zip
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: artifacts
+
+    - name: Display structure
+      run: ls -la artifacts/
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+        name: "MySQL Zero-Date Support ${{ github.event.inputs.tag || github.ref_name }}"
+        body: |
+          ## Prisma Engines - MySQL Zero-Date Support
+          
+          This release includes experimental MySQL zero-date handling that automatically converts 
+          zero dates (`0000-00-00`) and zero datetimes (`0000-00-00 00:00:00`) to `NULL` values 
+          to prevent decode errors in Prisma Client.
+          
+          ### 🚀 What's New
+          - Zero dates converted to NULL at Rust adapter layer
+          - Works with complex queries, joins, aggregations, raw SQL
+          - Handles MySQL and MariaDB DATE/DATETIME columns
+          - Preserves valid TIME values (00:00:00 remains unchanged)
+          
+          ### 📦 Download Instructions
+          1. Download the appropriate archive for your platform
+          2. Extract the binaries to a directory of your choice
+          3. Configure your `.env` file with the paths (see README in archive)
+          4. Run `npx prisma generate`
+          
+          ### ⚠️ Important Notes
+          - **Experimental feature** - test thoroughly before production use
+          - Only affects MySQL/MariaDB databases with legacy zero-date data
+          - No changes needed to your Prisma schema or application code
+          
+          ### 🔧 Platform Support
+          - Linux x64 & ARM64
+          - macOS x64 & ARM64 (Intel & Apple Silicon)  
+          - Windows x64
+          
+          **Source**: Built from [jmceleney/prisma-engines](https://github.com/jmceleney/prisma-engines)
+        files: |
+          artifacts/**/*.tar.gz
+          artifacts/**/*.zip
+        draft: false
+        prerelease: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
