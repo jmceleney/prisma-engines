@@ -1,8 +1,104 @@
-# Prisma Engines
+# Prisma Engines - MySQL Zero-Date Handling Fork
 
 [![Query Engine](https://github.com/prisma/prisma-engines/actions/workflows/test-query-engine.yml/badge.svg)](https://github.com/prisma/prisma-engines/actions/workflows/test-query-engine.yml)
 [![Schema Engine + sql_schema_describer](https://github.com/prisma/prisma-engines/actions/workflows/test-schema-engine.yml/badge.svg)](https://github.com/prisma/prisma-engines/actions/workflows/test-schema-engine.yml)
 [![Cargo docs](https://github.com/prisma/prisma-engines/actions/workflows/on-push-to-main.yml/badge.svg)](https://github.com/prisma/prisma-engines/actions/workflows/on-push-to-main.yml)
+
+> ⚠️ **EXPERIMENTAL FEATURE**: This fork includes MySQL zero-date handling that automatically converts zero dates (`0000-00-00`) and zero datetimes (`0000-00-00 00:00:00`) to `NULL` to prevent decode errors in Prisma Client.
+
+## 🚀 MySQL Zero-Date Support
+
+This fork addresses a common issue with legacy MySQL databases that contain "zero dates" - invalid date values like `0000-00-00` and `0000-00-00 00:00:00`. These values are permitted by MySQL under certain `sql_mode` settings but cause decode errors in Prisma Client because they cannot be converted to valid JavaScript Date objects.
+
+### What This Fork Does
+
+- **Automatic Conversion**: Zero dates are intercepted at the Rust adapter layer and converted to `NULL` before reaching Prisma Client
+- **No Breaking Changes**: Valid dates work exactly as before
+- **Error Prevention**: Eliminates "invalid date" decode errors when reading legacy data
+- **Comprehensive Coverage**: Handles DATE, DATETIME, DATETIME(N) columns in all query types (basic queries, joins, aggregations, raw SQL)
+
+### Zero Date Detection Rules
+
+A date/datetime is considered "zero" and converted to `NULL` if:
+- `year = 0` OR `month = 0` OR `day = 0`
+- Examples: `0000-00-00`, `2024-00-15`, `2024-12-00`, `0000-00-00 14:30:45`
+
+**Note**: TIME columns (e.g., `00:00:00`) are never affected as this represents valid midnight time.
+
+### Using This Fork in Your Project
+
+1. **Build the Custom Engines**:
+   ```bash
+   git clone https://github.com/jmceleney/prisma-engines.git
+   cd prisma-engines
+   cargo build --release
+   ```
+
+2. **Configure Your Prisma Project**:
+   Add these environment variables to your `.env` file:
+   ```env
+   # For binary engine mode (recommended)
+   PRISMA_CLIENT_ENGINE_TYPE=binary
+   PRISMA_QUERY_ENGINE_BINARY=/path/to/prisma-engines/target/release/query-engine
+   PRISMA_SCHEMA_ENGINE_BINARY=/path/to/prisma-engines/target/release/schema-engine
+   
+   # Alternative: For library engine mode
+   PRISMA_CLIENT_ENGINE_TYPE=library
+   PRISMA_QUERY_ENGINE_LIBRARY=/path/to/prisma-engines/target/release/libquery_engine.so
+   ```
+
+3. **Generate and Use**:
+   ```bash
+   npx prisma generate
+   # Your Prisma queries will now handle zero dates gracefully
+   ```
+
+### Example Behavior
+
+**Before (Original Prisma)**:
+```javascript
+// This would throw: "Invalid date value: 0000-00-00"
+const user = await prisma.user.findFirst({
+  where: { birthDate: { not: null } }
+});
+```
+
+**After (This Fork)**:
+```javascript
+// Zero dates appear as null, no errors thrown
+const users = await prisma.user.findMany();
+// users[0].birthDate === null (if it was 0000-00-00 in DB)
+// users[1].birthDate === new Date('1990-01-15') (if valid date)
+```
+
+### ⚠️ Important Notes
+
+- **Experimental**: This is a custom fork, not officially supported by Prisma
+- **Testing Recommended**: Thoroughly test with your specific database schema
+- **Performance**: Minimal performance impact (only affects date/datetime fields with zero values)
+- **Compatibility**: Works with MySQL and MariaDB
+
+### 🔧 Technical Implementation Details
+
+The zero-date conversion is implemented in the `quaint` crate's MySQL native connector:
+
+**File**: `quaint/src/connector/mysql/native/conversion.rs` (lines 280-302)
+
+**Key Changes**:
+- Modified `TakeRow` implementation to detect zero date components before `chrono` parsing
+- Added conversion logic for both `DATE` and `DATETIME` MySQL types  
+- Preserves valid midnight times (`00:00:00`) while converting invalid date parts to `NULL`
+
+**Flow**:
+1. MySQL wire protocol values arrive from database
+2. Zero-date detection occurs in Rust before JavaScript conversion
+3. Zero dates → `Value::null_date()` or `Value::null_datetime()`  
+4. Valid dates → Normal `chrono::NaiveDate`/`NaiveDateTime` conversion
+5. Prisma Client receives clean `null` or `Date` values
+
+This approach ensures zero dates are handled at the lowest level without affecting application logic or requiring schema changes.
+
+---
 
 This repository contains a collection of engines that power the core stack for
 [Prisma](https://github.com/prisma/prisma), most prominently [Prisma

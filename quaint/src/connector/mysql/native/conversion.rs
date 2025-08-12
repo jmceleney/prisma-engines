@@ -1,3 +1,10 @@
+// MySQL Zero-Date Handling:
+// This module includes special handling for MySQL zero dates (0000-00-00) and zero datetimes
+// (0000-00-00 00:00:00), which are invalid in standard SQL but allowed by MySQL with certain
+// sql_mode settings. Instead of throwing errors when encountering these values, we convert them
+// to NULL to maintain compatibility with applications that have legacy data containing zero dates.
+// This conversion applies to DATE and DATETIME types only, not TIME types.
+
 use crate::{
     ast::{Value, ValueType},
     connector::{TypeIdentifier, queryable::TakeRow},
@@ -278,35 +285,27 @@ impl TakeRow for my::Row {
                 my::Value::Float(f) => Value::from(f),
                 my::Value::Double(f) => Value::from(f),
                 my::Value::Date(year, month, day, _, _, _, _) if column.is_date() => {
-                    if day == 0 || month == 0 {
-                        let msg = format!(
-                            "The column `{}` contained an invalid datetime value with either day or month set to zero.",
-                            column.name_str()
-                        );
-                        let kind = ErrorKind::value_out_of_range(msg);
-                        return Err(Error::builder(kind).build());
+                    // MySQL zero dates: convert to NULL instead of erroring
+                    // Zero date is any date where year=0 OR month=0 OR day=0
+                    if year == 0 || month == 0 || day == 0 {
+                        Value::null_date()
+                    } else {
+                        let date = NaiveDate::from_ymd_opt(year.into(), month.into(), day.into()).unwrap();
+                        Value::date(date)
                     }
-
-                    let date = NaiveDate::from_ymd_opt(year.into(), month.into(), day.into()).unwrap();
-
-                    Value::date(date)
                 }
                 my::Value::Date(year, month, day, hour, min, sec, micro) => {
-                    if day == 0 || month == 0 {
-                        let msg = format!(
-                            "The column `{}` contained an invalid datetime value with either day or month set to zero.",
-                            column.name_str()
-                        );
-                        let kind = ErrorKind::value_out_of_range(msg);
-                        return Err(Error::builder(kind).build());
+                    // MySQL zero datetimes: convert to NULL instead of erroring
+                    // Zero datetime is any datetime where year=0 OR month=0 OR day=0
+                    // Note: Time components (hour, min, sec) can all be zero as that's valid (midnight)
+                    if year == 0 || month == 0 || day == 0 {
+                        Value::null_datetime()
+                    } else {
+                        let time = NaiveTime::from_hms_micro_opt(hour.into(), min.into(), sec.into(), micro).unwrap();
+                        let date = NaiveDate::from_ymd_opt(year.into(), month.into(), day.into()).unwrap();
+                        let dt = NaiveDateTime::new(date, time);
+                        Value::datetime(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc))
                     }
-
-                    let time = NaiveTime::from_hms_micro_opt(hour.into(), min.into(), sec.into(), micro).unwrap();
-
-                    let date = NaiveDate::from_ymd_opt(year.into(), month.into(), day.into()).unwrap();
-                    let dt = NaiveDateTime::new(date, time);
-
-                    Value::datetime(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc))
                 }
                 my::Value::Time(is_neg, days, hours, minutes, seconds, micros) => {
                     if is_neg {
